@@ -2,11 +2,12 @@
 save last played track from spotify API via google script to a google spreadsheet. 
 
 
- https://github.com/gsuitedevs/apps-script-oauth2
- https://developers.google.com/apps-script/guides/sheets
- https://developer.spotify.com/documentation/web-api/quick-start/
+ * https://github.com/gsuitedevs/apps-script-oauth2
+ * https://developers.google.com/apps-script/guides/sheets
+ * https://developer.spotify.com/documentation/web-api/quick-start/
 
-** Steps needed:
+*Steps needed:*
+
  1) Register to Spotify API. Create a App. https://developer.spotify.com/dashboard/applications
  2) Create Google Sheet and create script within. https://docs.google.com/spreadsheets
  3) Get Script ID from script and put it inside Redirect URIs. https://script.google.com/macros/d/<SCRIPT_ID>/usercallback
