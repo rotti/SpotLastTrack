@@ -34,7 +34,6 @@ function run() {
     var myTrack = result.items[0].track.name;
     var myExtUrl = result.items[0].track.external_urls.spotify;
     
-    //Logger.log("Last Played: ", myAlbum, myTrack, myExtUrl);  
 
     var lastExtUrl = readSheet(); 
 
@@ -42,7 +41,8 @@ function run() {
     if (lastExtUrl == myExtUrl) {
       Logger.log("You haven't listened to something new. Last track from sheet was:", lastExtUrl + " Last Track from API: " + myTrack);
     } else {
-      writeSheet(myAlbum, myTrack, myExtUrl); 
+      Logger.log("Writing Sheet with ", myAlbum, myTrack, myExtUrl); 
+      writeSheet(Date(), myAlbum, myTrack, myExtUrl); 
     }  
     
   } else {
@@ -103,9 +103,9 @@ function logRedirectUri() {
   
 }
 
-function writeSheet(myAlbum, myTrack, myExtUrl) {
+function writeSheet(Date, myAlbum, myTrack, myExtUrl) {
   var sheet = SpreadsheetApp.getActiveSheet();
-  sheet.appendRow([myAlbum, myTrack, myExtUrl]);
+  sheet.appendRow([Date, myAlbum, myTrack, myExtUrl]);
 }
 
 function readSheet() {
@@ -118,3 +118,4 @@ function readSheet() {
   }
   return last_extUrl;
 }
+
