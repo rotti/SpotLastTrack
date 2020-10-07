@@ -105,7 +105,6 @@ function logRedirectUri() {
 
 function writeSheet(myAlbum, myTrack, myExtUrl) {
   var sheet = SpreadsheetApp.getActiveSheet();
-  //sheet.appendRow(['Cotton Sweatshirt XL', 'css004']);
   sheet.appendRow([myAlbum, myTrack, myExtUrl]);
 }
 
@@ -115,9 +114,6 @@ function readSheet() {
   var last_extUrl = "";
   
   for (var i = 0; i < data.length; i++) {
-    //Logger.log('Product name: ' + data[i][0]);
-    //Logger.log('Product number: ' + data[i][1]);
-    //Logger.log('Product number: ' + data[i][2]);
     last_extUrl = data[i][2];
   }
   return last_extUrl;
