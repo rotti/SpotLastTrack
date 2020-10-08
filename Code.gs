@@ -52,12 +52,14 @@ function run() {
   }
 }
 
+
 /**
 * Reset the authorization state, so that it can be re-tested.
 */
 function reset() {
   getService().reset();
 }
+
 
 /**
 * Configures the service.
@@ -72,6 +74,8 @@ function getService() {
   .setClientId(CLIENT_ID)
   .setClientSecret(CLIENT_SECRET)
   
+  // Set the scope for my last listenend to
+  // https://developer.spotify.com/documentation/web-api/reference/player/get-recently-played/
   .setScope('user-read-recently-played')
 
   // Set the name of the callback function that should be invoked to complete
@@ -81,6 +85,7 @@ function getService() {
   // Set the property store where authorized tokens should be persisted.
   .setPropertyStore(PropertiesService.getUserProperties());
 }
+
 
 /**
 * Handles the OAuth callback.
@@ -95,6 +100,7 @@ function authCallback(request) {
   }
 }
 
+
 /**
  * Logs the redict URI to register.
  */
@@ -103,19 +109,24 @@ function logRedirectUri() {
   
 }
 
+
+/**
+ * Write sheet with Timestamp, my last Album and Track, Place a URL for easy opening and as hash-equivalent
+ */
 function writeSheet(Date, myAlbum, myTrack, myExtUrl) {
   var sheet = SpreadsheetApp.getActiveSheet();
   sheet.appendRow([Date, myAlbum, myTrack, myExtUrl]);
 }
 
-function readSheet() {
-  var sheet = SpreadsheetApp.getActiveSheet();
-  var data = sheet.getDataRange().getValues();
-  var last_extUrl = "";
-  
-  for (var i = 0; i < data.length; i++) {
-    last_extUrl = data[i][2];
-  }
-  return last_extUrl;
-}
 
+/**
+ * Read last value from last row and column to compare if something changed
+ */
+function readSheet() {
+  var sheet = SpreadsheetApp.getActiveSheet(); 
+  var lastRow = sheet.getLastRow();
+  var lastColumn = sheet.getLastColumn();
+  var lastCell = sheet.getRange(lastRow, lastColumn);
+
+  return lastCell.getValue();
+}
