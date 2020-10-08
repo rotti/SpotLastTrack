@@ -27,13 +27,11 @@ function run() {
       headers: {'Authorization': 'Bearer ' + service.getAccessToken()}
     });
     var result = JSON.parse(response.getContentText());
-
     //Logger.log("Response ", result);
     
     var myAlbum = result.items[0].track.album.name;
     var myTrack = result.items[0].track.name;
-    var myExtUrl = result.items[0].track.external_urls.spotify;
-    
+    var myExtUrl = result.items[0].track.external_urls.spotify;   
 
     var lastExtUrl = readSheet(); 
 
