@@ -9,8 +9,9 @@
 * 3) Get Script ID from script and put it inside Redirect URIs. https://script.google.com/macros/d/<SCRIPT_ID>/usercallback
 * 4) Get ClientID and ClientSecret and save to script. https://developer.spotify.com/dashboard/applications
 * 5) Register Oauth2 Lib inside script. "In the "Find a Library" text box, enter the script ID 1B7FSrk5Zi6L1rSxxTDgDEUsPzlukDsi4KGuTMorsTQHhGBzBkMun4iDF and click the "Select" button."
-* 6) Run script first time. Look at your Log. Put the given URL inside your browser. Allow access. 
-* 7) Set trigger to script. For example every 30 minutes.
+* 6) Run script the first time. A pop-up appears. Go through it (unsafe part). Authorize the google script.
+* 7) Run script a second time. Look at your Log. Put the given URL inside your browser. Allow access. (Spotify Auth part)
+* 8) Set trigger to script. For example every 30 minutes.
 */
 
 var CLIENT_ID = '...';
