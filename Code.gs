@@ -10,27 +10,31 @@
  * 1) Spotify-App:  https://developer.spotify.com/dashboard
  * 2) Google Sheet → Erweiterungen → Apps Script. Dort diese Datei als Code.gs
  *    und die Index.html anlegen. Danach speichern und das Sheet-Tab einmal
- *    neu laden (F5) – erst dann erscheint das Menü aus Schritt 4.
+ *    neu laden (F5) – erst dann erscheint das Menü aus Schritt 3.
  * 3) OAuth2-Bibliothek hinzufügen:
  *    Script-ID 1B7FSrk5Zi6L1rSxxTDgDEUsPzlukDsi4KGuTMorsTQHhGBzBkMun4iDF
- * 4) Zurück im Google Sheet: Menü "Spotify" → "Redirect-URI anzeigen".
- *    Die angezeigte URL bei Spotify unter "Redirect URIs" eintragen.
- * 5) Menü "Spotify" → "Zugangsdaten eintragen". Fragt Client-ID und
- *    Client-Secret nacheinander per Dialog ab – kein Code-Editing nötig,
- *    auch nicht beim allerersten Mal. Erneut aufrufbar, wenn sich die
- *    Zugangsdaten mal ändern.
- * 6) Menü "Spotify" → "Einrichten (Sheets, Trigger)".
- * 7) Menü "Spotify" → "Mit Spotify verbinden". Zeigt eine Autorisierungs-URL
- *    als Dialog; öffnen und Zugriff erlauben. Danach im Menü
- *    "Verbindung prüfen" wählen, um zu bestätigen, dass es geklappt hat.
- * 8) Bereitstellen → Neue Bereitstellung → Web-App
+ * 4) Zurück im Google Sheet: Menü "Spotify" → "Einrichten (Zugangsdaten +
+ *    Verbindung)". Fragt Client-ID und Client-Secret ab und erledigt danach
+ *    automatisch: Sheet/Header anlegen, 1-Minuten-Trigger setzen und den
+ *    Autorisierungs-Dialog öffnen (inkl. der Redirect-URI zum Eintragen bei
+ *    Spotify, falls noch nicht geschehen).
+ * 5) Im geöffneten Dialog den Link zu Spotify öffnen und den Zugriff
+ *    erlauben. Das ist der einzige Schritt, der zwingend von Hand passiert –
+ *    er ist Teil des OAuth-Protokolls und lässt sich nicht automatisieren.
+ *    Danach läuft alles über den Trigger, ohne weitere Interaktion:
+ *    Positions-Tracking, Lücken-Sync, Hörbuch-Erkennung, Token-Erneuerung.
+ * 6) Bereitstellen → Neue Bereitstellung → Web-App
  *    ("Ausführen als: Ich", "Zugriff: Nur ich"). Die /exec-URL auf dem Handy
  *    zum Startbildschirm hinzufügen.
  *
+ * "Status prüfen" im Menü zeigt jederzeit, ob Verbindung und Trigger aktiv
+ * sind und wann zuletzt synchronisiert wurde – nur zur Kontrolle, für den
+ * Betrieb nicht nötig.
+ *
  * Hinweis zu Scopes: Für das Fortsetzen an exakter Position wird
  * user-modify-playback-state benötigt (Spotify Premium). Nach einer Änderung
- * der Scopes einmal im Menü "Verbindung zurücksetzen" wählen und neu
- * autorisieren (Schritt 7).
+ * der Scopes einmal im Menü "Verbindung zurücksetzen" wählen und über
+ * "Einrichten" neu autorisieren.
  */
 
 var CONFIG = {
@@ -50,7 +54,15 @@ var CONFIG = {
   // Abspielsteuerung (Premium). false = nur Deep-Links in die Spotify-App.
   ENABLE_PLAYBACK_CONTROL: true,
 
-  POLL_MINUTES: 5,                    // Trigger-Intervall = Positionsgenauigkeit
+  // Serien-Erkennung: Hörbücher erzeugen lange Ketten mit gleichem
+  // Interpreten (dem Autor/Sprecher), Musik wechselt häufiger. Ergänzt die
+  // Längen-/Namenserkennung in classify() um Fälle, in denen Hörbücher wie
+  // normale, kurze Musik-Tracks geschnitten sind.
+  STREAK_MIN_RUN: 4,          // ab so vielen Tracks am Stück vom selben Interpreten
+  STREAK_MIN_RUN_SEQUENTIAL: 2, // ab so vielen, wenn Titel zusätzlich hochzählen
+  STREAK_SCAN_ROWS: 600,        // wie weit die Ketten-Analyse beim Sync zurückschaut
+
+  POLL_MINUTES: 1,                    // Trigger-Intervall = Positionsgenauigkeit
   DEDUPE_WINDOW_MIN: 45,              // Fenster gegen Doppeleinträge
   SCAN_ROWS: 400                      // wie viele Zeilen die App durchsucht
 };
@@ -76,46 +88,54 @@ var PROP_CURSOR = 'lastPlayedAtMs';
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Spotify')
-    .addItem('Zugangsdaten eintragen', 'promptForCredentials')
-    .addItem('Redirect-URI anzeigen', 'showRedirectUri')
+    .addItem('Einrichten (Zugangsdaten + Verbindung)', 'promptForCredentials')
     .addSeparator()
-    .addItem('Einrichten (Sheets, Trigger)', 'setup')
-    .addItem('Mit Spotify verbinden', 'promptForAuthorization')
-    .addItem('Verbindung prüfen', 'checkConnection')
-    .addItem('Verbindung zurücksetzen', 'resetFromMenu')
-    .addSeparator()
+    .addItem('Status prüfen', 'checkConnection')
     .addItem('Jetzt synchronisieren', 'runFromMenu')
+    .addItem('Neu klassifizieren (ganzes Log)', 'reclassifyAllFromMenu')
+    .addSeparator()
+    .addItem('Verbindung zurücksetzen', 'resetFromMenu')
+    .addItem('Redirect-URI anzeigen', 'showRedirectUri')
     .addToUi();
 }
 
 /**
- * Fragt Client-ID und Secret über zwei Dialoge ab und speichert sie in den
- * Script Properties. Ersetzt das manuelle Ausführen einer Funktion mit
- * Parametern, was im gebundenen Editor ohne Dropdown-Trick nicht geht.
+ * Der EINZIGE Schritt, der von Hand ausgeführt werden muss. Fragt
+ * Client-ID und Secret ab und stößt danach automatisch alles Weitere an:
+ * Sheet/Header anlegen, den 1-Minuten-Trigger setzen und den
+ * Autorisierungs-Dialog öffnen. Ab dem Klick auf "Erlauben" bei Spotify
+ * läuft alles über den Trigger, ohne weitere Interaktion.
  */
 function promptForCredentials() {
   var ui = SpreadsheetApp.getUi();
 
-  var idResp = ui.prompt('Spotify-Verbindung (1/2)',
+  var idResp = ui.prompt('Spotify-Einrichtung (1/2)',
     'Client-ID aus dem Spotify-Dashboard einfügen:', ui.ButtonSet.OK_CANCEL);
   if (idResp.getSelectedButton() !== ui.Button.OK) return;
   var clientId = idResp.getResponseText().trim();
   if (!clientId) { ui.alert('Keine Client-ID eingegeben. Abgebrochen.'); return; }
 
-  var secretResp = ui.prompt('Spotify-Verbindung (2/2)',
+  var secretResp = ui.prompt('Spotify-Einrichtung (2/2)',
     'Client-Secret einfügen:', ui.ButtonSet.OK_CANCEL);
   if (secretResp.getSelectedButton() !== ui.Button.OK) return;
   var clientSecret = secretResp.getResponseText().trim();
   if (!clientSecret) { ui.alert('Kein Client-Secret eingegeben. Abgebrochen.'); return; }
 
   setCredentials(clientId, clientSecret);
-  ui.alert('Gespeichert. Weiter mit "Redirect-URI anzeigen", dann "Mit Spotify verbinden".');
+  ensureSetup();   // Sheet, Header, Trigger – ab jetzt automatisch
+
+  if (getService().hasAccess()) {
+    ui.alert('Zugangsdaten aktualisiert. Verbindung besteht bereits – der Trigger läuft.');
+    return;
+  }
+
+  // Redirect-URI direkt mitliefern, damit der Weg zu Spotify ohne
+  // Zwischenschritt "Redirect-URI anzeigen" funktioniert.
+  showAuthorizationDialog();
 }
 
 /**
- * Speichert Client-ID/-Secret in den Script Properties. Bleibt als eigene
- * Funktion erhalten, falls du sie weiterhin direkt im Editor aufrufen willst
- * (z. B. für eine Automatisierung) – der Dialog oben ist nur der bequeme Weg.
+ * Speichert Client-ID/-Secret in den Script Properties.
  */
 function setCredentials(clientId, clientSecret) {
   PropertiesService.getScriptProperties()
@@ -130,28 +150,32 @@ function showRedirectUri() {
 }
 
 /**
- * Zeigt die Authorization-URL als klickbaren Link in einem HTML-Dialog,
- * statt sie nur ins Ausführungsprotokoll zu loggen – das Protokoll ist im
- * gebundenen Editor leicht zu übersehen.
+ * Zeigt Redirect-URI (zum einmaligen Eintragen bei Spotify) und
+ * Autorisierungs-Link in einem einzigen Dialog. Nach dem Klick auf
+ * "Erlauben" im Spotify-Tab übernimmt authCallback() den Rest automatisch –
+ * kein Rückweg ins Sheet nötig.
  */
-function promptForAuthorization() {
+function showAuthorizationDialog() {
   var ui = SpreadsheetApp.getUi();
-  var missing = missingCredentials();
-  if (missing) { ui.alert(missing); return; }
-
   var service = getService();
   if (service.hasAccess()) {
     ui.alert('Schon verbunden. Bei Bedarf zuerst "Verbindung zurücksetzen" wählen.');
     return;
   }
 
-  var url = service.getAuthorizationUrl();
+  var redirect = OAuth2.getRedirectUri();
+  var authUrl = service.getAuthorizationUrl();
   var html = HtmlService.createHtmlOutput(
-    '<div style="font-family:sans-serif;padding:8px">' +
-    '<p>Diesen Link öffnen und den Zugriff bei Spotify erlauben:</p>' +
-    '<p><a href="' + url + '" target="_blank">' + url + '</a></p>' +
-    '<p>Danach dieses Fenster schließen und im Menü "Verbindung prüfen" wählen.</p>' +
-    '</div>').setWidth(480).setHeight(200);
+    '<div style="font-family:sans-serif;padding:8px;line-height:1.5">' +
+    '<p><b>Einmalig bei Spotify hinterlegen</b> (Dashboard → App → Settings → ' +
+    'Redirect URIs), falls noch nicht geschehen:</p>' +
+    '<p style="word-break:break-all;background:#f1f1f1;padding:6px;border-radius:4px">' +
+      redirect + '</p>' +
+    '<p><b>Danach diesen Link öffnen</b> und den Zugriff erlauben:</p>' +
+    '<p><a href="' + authUrl + '" target="_blank">Bei Spotify verbinden</a></p>' +
+    '<p>Das war’s – dieses Fenster kann danach geschlossen werden. Alles Weitere ' +
+    'läuft automatisch über den Trigger.</p>' +
+    '</div>').setWidth(480).setHeight(260);
   ui.showModalDialog(html, 'Mit Spotify verbinden');
 }
 
@@ -160,14 +184,23 @@ function checkConnection() {
   var missing = missingCredentials();
   if (missing) { ui.alert(missing); return; }
 
-  ui.alert(getService().hasAccess()
-    ? 'Verbunden. Synchronisation läuft über den Trigger bzw. "Jetzt synchronisieren".'
-    : 'Noch nicht verbunden. "Mit Spotify verbinden" wählen und den Zugriff erlauben.');
+  var connected = getService().hasAccess();
+  var triggerActive = ScriptApp.getProjectTriggers().some(function (t) {
+    return t.getHandlerFunction() === 'run';
+  });
+  var lastRun = PropertiesService.getUserProperties().getProperty('lastRunAt');
+
+  var lines = [
+    connected ? '✅ Mit Spotify verbunden.' : '❌ Nicht verbunden – "Einrichten" wählen.',
+    triggerActive ? '✅ Automatischer Trigger aktiv.' : '❌ Kein Trigger gefunden – "Einrichten" wählen.',
+    lastRun ? 'Letzter Lauf: ' + lastRun : 'Noch kein automatischer Lauf erfolgt.'
+  ];
+  ui.alert(lines.join('\n'));
 }
 
 function resetFromMenu() {
   reset();
-  SpreadsheetApp.getUi().alert('Verbindung zurückgesetzt. Neu verbinden über "Mit Spotify verbinden".');
+  SpreadsheetApp.getUi().alert('Verbindung zurückgesetzt. Über "Einrichten" neu verbinden.');
 }
 
 function runFromMenu() {
@@ -175,7 +208,7 @@ function runFromMenu() {
   var missing = missingCredentials();
   if (missing) { ui.alert(missing); return; }
   if (!getService().hasAccess()) {
-    ui.alert('Noch nicht verbunden. Zuerst "Mit Spotify verbinden" wählen.');
+    ui.alert('Noch nicht verbunden. Zuerst "Einrichten" wählen.');
     return;
   }
   run();
@@ -185,23 +218,31 @@ function runFromMenu() {
 function missingCredentials() {
   var props = PropertiesService.getScriptProperties();
   if (!props.getProperty('CLIENT_ID') || !props.getProperty('CLIENT_SECRET')) {
-    return 'Erst "Zugangsdaten eintragen" ausführen.';
+    return 'Erst "Einrichten" wählen und Zugangsdaten eintragen.';
   }
   return null;
 }
 
-function setup() {
+/**
+ * Legt Sheet/Header an und sorgt dafür, dass genau ein Trigger für run()
+ * existiert. Idempotent – beliebig oft aufrufbar, u. a. bei jeder
+ * Änderung der Zugangsdaten, damit nach einem Redeploy nichts von Hand
+ * nachgeholt werden muss.
+ */
+function ensureSetup() {
   var sheet = getLogSheet();
   ensureHeader(sheet);
 
-  // Alte Trigger entfernen, damit setup() mehrfach laufen darf.
-  ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'run') ScriptApp.deleteTrigger(t);
+  var hasTrigger = ScriptApp.getProjectTriggers().some(function (t) {
+    return t.getHandlerFunction() === 'run';
   });
-  ScriptApp.newTrigger('run').timeBased().everyMinutes(CONFIG.POLL_MINUTES).create();
-
-  Logger.log('Fertig. Trigger läuft alle %s Minuten.', CONFIG.POLL_MINUTES);
+  if (!hasTrigger) {
+    ScriptApp.newTrigger('run').timeBased().everyMinutes(CONFIG.POLL_MINUTES).create();
+  }
 }
+
+/** Beibehalten für manuelles Auslösen im Editor; ruft dieselbe Logik auf. */
+function setup() { ensureSetup(); }
 
 function ensureHeader(sheet) {
   var range = sheet.getRange(1, 1, 1, HEADERS.length);
@@ -243,8 +284,11 @@ function run() {
   try {
     var sheet = getLogSheet();
     ensureHeader(sheet);
-    pollPlayback(sheet);          // liefert die Position – der wichtige Teil
-    syncRecentlyPlayed(sheet);    // schließt Lücken zwischen zwei Läufen
+    pollPlayback(sheet);           // liefert die Position – der wichtige Teil
+    syncRecentlyPlayed(sheet);     // schließt Lücken zwischen zwei Läufen
+    reclassifyStreaks(sheet, CONFIG.STREAK_SCAN_ROWS);  // erkennt Hörbücher an Ketten
+    PropertiesService.getUserProperties().setProperty(
+      'lastRunAt', Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd.MM. HH:mm:ss'));
   } finally {
     lock.releaseLock();
   }
@@ -308,6 +352,106 @@ function isDuplicate(rows, entry) {
 
 
 /* =========================================================================
+ * Serien-Erkennung (Ketten gleichen Interpreten)
+ * ========================================================================= */
+
+/**
+ * Zweite Erkennungsstufe zusätzlich zu classify(): Hörbücher, die als
+ * normale, kurze Musik-Tracks vorliegen, erzeugen typischerweise lange
+ * Ketten mit demselben Interpreten (dem Autor/Sprecher) und oft
+ * hochzählenden Titeln ("Kapitel 3", "Kapitel 4", ...). Musikhören wechselt
+ * den Interpreten deutlich häufiger. Erkannte Ketten werden von "Musik" auf
+ * "Hörbuch" hochgestuft – nie umgekehrt, und nie bei Alben, die per
+ * markAsMusic() ausdrücklich als Musik markiert wurden.
+ *
+ * Läuft nach jedem Sync automatisch über die letzten STREAK_SCAN_ROWS
+ * Zeilen. Für die komplette Historie gibt es den Menüpunkt
+ * "Neu klassifizieren (ganzes Log)".
+ */
+function reclassifyStreaks(sheet, limitRows) {
+  var last = sheet.getLastRow();
+  if (last < 3) return 0;   // mindestens 2 Datenzeilen nötig für eine Kette
+
+  var count = Math.min(limitRows || CONFIG.STREAK_SCAN_ROWS, last - 1);
+  var range = sheet.getRange(2, 1, count, HEADERS.length);
+  var rows = range.getValues();
+  var musicOverrides = getOverrides().music;
+
+  // Zur chronologischen Analyse (älteste zuerst) mit Original-Zeilenindex.
+  var items = rows.map(function (r, i) {
+    return {
+      i: i,
+      date: r[C.DATE - 1],
+      type: r[C.TYPE - 1],
+      artist: String(r[C.ARTIST - 1] || '').trim().toLowerCase(),
+      album: String(r[C.ALBUM - 1] || '').trim().toLowerCase(),
+      track: r[C.TRACK - 1]
+    };
+  }).filter(function (it) { return it.date instanceof Date; })
+    .sort(function (a, b) { return a.date - b.date; });
+
+  var upgrades = [];   // Original-Zeilenindizes, die auf "Hörbuch" gehen
+  var run = [];
+
+  function flushRun() {
+    if (run.length === 0) return;
+    var qualifies = run.length >= CONFIG.STREAK_MIN_RUN ||
+      (run.length >= CONFIG.STREAK_MIN_RUN_SEQUENTIAL &&
+       looksSequential(run.map(function (it) { return it.track; })));
+
+    if (qualifies) {
+      run.forEach(function (it) {
+        if (it.type !== 'Hörbuch' && !musicOverrides[it.album]) upgrades.push(it.i);
+      });
+    }
+    run = [];
+  }
+
+  items.forEach(function (it, idx) {
+    var prev = items[idx - 1];
+    var sameChain = prev && prev.artist === it.artist && it.artist !== '';
+    if (!sameChain) flushRun();
+    run.push(it);
+  });
+  flushRun();
+
+  if (upgrades.length) {
+    upgrades.forEach(function (rowIdx) { rows[rowIdx][C.TYPE - 1] = 'Hörbuch'; });
+    range.setValues(rows);
+  }
+  return upgrades.length;
+}
+
+/**
+ * True, wenn die im Titel enthaltenen Zahlen über die Kette hinweg
+ * größtenteils ansteigen – Indiz für hochzählende Kapitel/Teile.
+ */
+function looksSequential(tracks) {
+  var nums = tracks.map(extractTrailingNumber).filter(function (n) { return n !== null; });
+  if (nums.length < Math.max(2, Math.ceil(tracks.length * 0.6))) return false;
+
+  var increasing = 0;
+  for (var i = 1; i < nums.length; i++) if (nums[i] > nums[i - 1]) increasing++;
+  return increasing >= (nums.length - 1) * 0.7;
+}
+
+function extractTrailingNumber(title) {
+  var m = String(title || '').match(/(\d+)(?!.*\d)/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+/** Klassifiziert die komplette Sheet-Historie neu (Menüpunkt). */
+function reclassifyAllFromMenu() {
+  var ui = SpreadsheetApp.getUi();
+  var sheet = getLogSheet();
+  var n = reclassifyStreaks(sheet, sheet.getLastRow() - 1);
+  ui.alert(n
+    ? n + ' Zeile(n) als Hörbuch neu erkannt.'
+    : 'Keine neuen Ketten gefunden.');
+}
+
+
+/* =========================================================================
  * Daten für die Web-App
  * ========================================================================= */
 
@@ -346,7 +490,8 @@ function getResumeItems(showAll) {
   return {
     items: out.slice(0, 25),
     playbackControl: CONFIG.ENABLE_PLAYBACK_CONTROL,
-    rewind: CONFIG.REWIND_SECONDS
+    rewind: CONFIG.REWIND_SECONDS,
+    totalLoggedRows: rows.length   // ungefiltert – unterscheidet "leer" von "alles rausgefiltert"
   };
 }
 
@@ -591,7 +736,13 @@ function getService() {
 
 function authCallback(request) {
   var ok = getService().handleCallback(request);
-  return HtmlService.createHtmlOutput(ok ? 'Verbunden. Tab kann geschlossen werden.' : 'Zugriff verweigert.');
+  if (ok) {
+    ensureSetup();   // falls die Autorisierung vor "Einrichten" abgeschlossen wurde
+    try { run(); } catch (e) { Logger.log('Erster Lauf nach Autorisierung fehlgeschlagen: %s', e.message); }
+  }
+  return HtmlService.createHtmlOutput(ok
+    ? 'Verbunden. Ab jetzt läuft alles automatisch über den Trigger – dieser Tab kann geschlossen werden.'
+    : 'Zugriff verweigert.');
 }
 
 function reset() { getService().reset(); }
