@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<style>
+  :root {
+    --bg: #121212;
+    --card: #1e1e1e;
+    --card-press: #2a2a2a;
+    --text: #ffffff;
+    --muted: #a7a7a7;
+    --accent: #1db954;
+    --line: #2e2e2e;
+    --tap: 60px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0;
+    padding: env(safe-area-inset-top, 0) 12px calc(24px + env(safe-area-inset-bottom, 0));
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 17px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 4px 10px;
+    position: sticky; top: 0; background: var(--bg); z-index: 5;
+  }
+  h1 { font-size: 21px; margin: 0; letter-spacing: -0.3px; }
+  .ghost {
+    background: none; border: 1px solid var(--line); color: var(--muted);
+    border-radius: 999px; padding: 9px 14px; font-size: 14px; min-height: 44px;
+  }
+  .ghost:active { background: var(--card-press); }
+
+  .card {
+    background: var(--card);
+    border-radius: 16px;
+    margin-bottom: 14px;
+    overflow: hidden;
+  }
+  .head { display: flex; gap: 12px; padding: 14px; align-items: center; }
+  .cover {
+    width: 64px; height: 64px; border-radius: 8px; flex: 0 0 64px;
+    background: #333 center/cover no-repeat;
+  }
+  .meta { min-width: 0; flex: 1; }
+  .album { font-weight: 700; font-size: 17px; line-height: 1.25; }
+  .track { color: var(--muted); font-size: 15px; margin-top: 3px;
+           overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .when  { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+  .bar { height: 4px; background: #333; margin: 0 14px 12px; border-radius: 2px; }
+  .fill { height: 100%; background: var(--accent); border-radius: 2px; }
+
+  .actions { display: flex; gap: 10px; padding: 0 14px 14px; }
+  .btn {
+    flex: 1; min-height: var(--tap);
+    display: flex; align-items: center; justify-content: center;
+    border: none; border-radius: 12px;
+    font-size: 17px; font-weight: 700; text-decoration: none;
+    padding: 0 14px; text-align: center; line-height: 1.2;
+  }
+  .primary { background: var(--accent); color: #000; }
+  .primary:active { background: #17a449; }
+  .secondary { background: #333; color: var(--text); flex: 0 0 38%; font-weight: 600; font-size: 15px; }
+  .secondary:active { background: var(--card-press); }
+
+  .toast {
+    padding: 0 14px 14px; font-size: 14px; color: var(--muted);
+  }
+  .toast.err { color: #ff8a80; }
+  .toast.ok  { color: var(--accent); }
+
+  .empty, .loading { color: var(--muted); text-align: center; padding: 48px 20px; }
+  .skeleton { height: 150px; background: var(--card); border-radius: 16px; margin-bottom: 14px;
+              animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: .45 } 50% { opacity: .85 } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Weiterhören</h1>
+  <button class="ghost" id="toggle" onclick="toggleAll()">Alles</button>
+</header>
+
+<div id="list">
+  <div class="skeleton"></div>
+  <div class="skeleton"></div>
+</div>
+
+<script>
+  var showAll = false;
+  var state = { rewind: 20, playbackControl: false };
+
+  function load() {
+    document.getElementById('list').innerHTML =
+      '<div class="skeleton"></div><div class="skeleton"></div>';
+    google.script.run
+      .withSuccessHandler(render)
+      .withFailureHandler(function (e) {
+        document.getElementById('list').innerHTML =
+          '<div class="empty">Konnte nicht laden.<br>' + escapeHtml(e.message || '') + '</div>';
+      })
+      .getResumeItems(showAll);
+  }
+
+  function render(data) {
+    state.rewind = data.rewind;
+    state.playbackControl = data.playbackControl;
+
+    if (!data.items.length) {
+      document.getElementById('list').innerHTML =
+        '<div class="empty">Noch nichts protokolliert.<br>Etwas hören und dann neu laden.</div>';
+      return;
+    }
+
+    document.getElementById('list').innerHTML = data.items.map(function (it, i) {
+      var cover = it.image
+        ? '<div class="cover" style="background-image:url(\'' + it.image + '\')"></div>'
+        : '<div class="cover"></div>';
+
+      var pos = it.position
+        ? 'bei ' + it.position + (it.length ? ' / ' + it.length : '')
+        : '';
+
+      var resumeLabel = it.positionMs
+        ? 'Weiter ab ' + minus(it.position, state.rewind)
+        : 'Abspielen';
+
+      var primary = state.playbackControl && it.uri
+        ? '<button class="btn primary" onclick="resume(this,' + i + ')">' + resumeLabel + '</button>'
+        : '<a class="btn primary" href="' + it.link + '" target="_blank" rel="noopener">In Spotify öffnen</a>';
+
+      var secondary = state.playbackControl && it.link
+        ? '<a class="btn secondary" href="' + it.link + '" target="_blank" rel="noopener">App</a>'
+        : '';
+
+      return '<div class="card" data-uri="' + escapeHtml(it.uri) + '" data-pos="' + it.positionMs + '">' +
+               '<div class="head">' + cover +
+                 '<div class="meta">' +
+                   '<div class="album">' + escapeHtml(it.album) + '</div>' +
+                   '<div class="track">' + escapeHtml(it.track) + '</div>' +
+                   '<div class="when">' + escapeHtml(it.when) + (pos ? ' · ' + pos : '') + '</div>' +
+                 '</div>' +
+               '</div>' +
+               (it.percent ? '<div class="bar"><div class="fill" style="width:' + it.percent + '%"></div></div>' : '') +
+               '<div class="actions">' + primary + secondary + '</div>' +
+               '<div class="toast" style="display:none"></div>' +
+             '</div>';
+    }).join('');
+  }
+
+  function resume(btn, index) {
+    var card = btn.closest('.card');
+    var toast = card.querySelector('.toast');
+    var label = btn.textContent;
+    btn.textContent = 'Starte …';
+    btn.disabled = true;
+
+    google.script.run
+      .withSuccessHandler(function (res) {
+        btn.textContent = label;
+        btn.disabled = false;
+        toast.style.display = 'block';
+        toast.className = 'toast ' + (res.ok ? 'ok' : 'err');
+        toast.textContent = res.message;
+      })
+      .withFailureHandler(function (e) {
+        btn.textContent = label;
+        btn.disabled = false;
+        toast.style.display = 'block';
+        toast.className = 'toast err';
+        toast.textContent = e.message || 'Fehler';
+      })
+      .resumePlayback(card.dataset.uri, Number(card.dataset.pos));
+  }
+
+  function toggleAll() {
+    showAll = !showAll;
+    document.getElementById('toggle').textContent = showAll ? 'Nur Hörbücher' : 'Alles';
+    load();
+  }
+
+  /** "12:34" minus n Sekunden, nur zur Anzeige. */
+  function minus(clock, seconds) {
+    if (!clock) return '0:00';
+    var p = clock.split(':').map(Number).reverse();
+    var total = (p[0] || 0) + (p[1] || 0) * 60 + (p[2] || 0) * 3600 - seconds;
+    if (total < 0) total = 0;
+    var m = Math.floor(total / 60), s = total % 60;
+    return m + ':' + (s < 10 ? '0' + s : s);
+  }
+
+  function escapeHtml(str) {
+    return String(str == null ? '' : str).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  load();
+</script>
+</body>
+</html>
