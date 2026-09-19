@@ -9,21 +9,28 @@
  * -----------
  * 1) Spotify-App:  https://developer.spotify.com/dashboard
  * 2) Google Sheet → Erweiterungen → Apps Script. Dort diese Datei als Code.gs
- *    und die Index.html anlegen.
+ *    und die Index.html anlegen. Danach speichern und das Sheet-Tab einmal
+ *    neu laden (F5) – erst dann erscheint das Menü aus Schritt 4.
  * 3) OAuth2-Bibliothek hinzufügen:
  *    Script-ID 1B7FSrk5Zi6L1rSxxTDgDEUsPzlukDsi4KGuTMorsTQHhGBzBkMun4iDF
- * 4) logRedirectUri() ausführen und die geloggte URL bei Spotify unter
- *    "Redirect URIs" eintragen.
- * 5) Im Editor einmal setCredentials('<CLIENT_ID>', '<CLIENT_SECRET>') ausführen.
- * 6) setup() ausführen: legt Sheets, Kopfzeile, Formate und den Trigger an.
- * 7) run() ausführen, die geloggte Authorization-URL öffnen, Zugriff erlauben.
+ * 4) Zurück im Google Sheet: Menü "Spotify" → "Redirect-URI anzeigen".
+ *    Die angezeigte URL bei Spotify unter "Redirect URIs" eintragen.
+ * 5) Menü "Spotify" → "Zugangsdaten eintragen". Fragt Client-ID und
+ *    Client-Secret nacheinander per Dialog ab – kein Code-Editing nötig,
+ *    auch nicht beim allerersten Mal. Erneut aufrufbar, wenn sich die
+ *    Zugangsdaten mal ändern.
+ * 6) Menü "Spotify" → "Einrichten (Sheets, Trigger)".
+ * 7) Menü "Spotify" → "Mit Spotify verbinden". Zeigt eine Autorisierungs-URL
+ *    als Dialog; öffnen und Zugriff erlauben. Danach im Menü
+ *    "Verbindung prüfen" wählen, um zu bestätigen, dass es geklappt hat.
  * 8) Bereitstellen → Neue Bereitstellung → Web-App
  *    ("Ausführen als: Ich", "Zugriff: Nur ich"). Die /exec-URL auf dem Handy
  *    zum Startbildschirm hinzufügen.
  *
  * Hinweis zu Scopes: Für das Fortsetzen an exakter Position wird
  * user-modify-playback-state benötigt (Spotify Premium). Nach einer Änderung
- * der Scopes einmal reset() ausführen und neu autorisieren.
+ * der Scopes einmal im Menü "Verbindung zurücksetzen" wählen und neu
+ * autorisieren (Schritt 7).
  */
 
 var CONFIG = {
@@ -57,12 +64,130 @@ var PROP_CURSOR = 'lastPlayedAtMs';
 
 
 /* =========================================================================
- * Einrichtung
+ * Einrichtung über Sheets-Menü
  * ========================================================================= */
 
+/**
+ * Läuft automatisch beim Öffnen des Google Sheets und baut das Menü auf.
+ * Ohne dieses Menü müsste jede Einrichtung über manuelles Ausführen von
+ * Funktionen im Script-Editor erfolgen – das ist der Teil, der bisher
+ * fehleranfällig war, gerade beim allerersten Mal nach einer Codeänderung.
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Spotify')
+    .addItem('Zugangsdaten eintragen', 'promptForCredentials')
+    .addItem('Redirect-URI anzeigen', 'showRedirectUri')
+    .addSeparator()
+    .addItem('Einrichten (Sheets, Trigger)', 'setup')
+    .addItem('Mit Spotify verbinden', 'promptForAuthorization')
+    .addItem('Verbindung prüfen', 'checkConnection')
+    .addItem('Verbindung zurücksetzen', 'resetFromMenu')
+    .addSeparator()
+    .addItem('Jetzt synchronisieren', 'runFromMenu')
+    .addToUi();
+}
+
+/**
+ * Fragt Client-ID und Secret über zwei Dialoge ab und speichert sie in den
+ * Script Properties. Ersetzt das manuelle Ausführen einer Funktion mit
+ * Parametern, was im gebundenen Editor ohne Dropdown-Trick nicht geht.
+ */
+function promptForCredentials() {
+  var ui = SpreadsheetApp.getUi();
+
+  var idResp = ui.prompt('Spotify-Verbindung (1/2)',
+    'Client-ID aus dem Spotify-Dashboard einfügen:', ui.ButtonSet.OK_CANCEL);
+  if (idResp.getSelectedButton() !== ui.Button.OK) return;
+  var clientId = idResp.getResponseText().trim();
+  if (!clientId) { ui.alert('Keine Client-ID eingegeben. Abgebrochen.'); return; }
+
+  var secretResp = ui.prompt('Spotify-Verbindung (2/2)',
+    'Client-Secret einfügen:', ui.ButtonSet.OK_CANCEL);
+  if (secretResp.getSelectedButton() !== ui.Button.OK) return;
+  var clientSecret = secretResp.getResponseText().trim();
+  if (!clientSecret) { ui.alert('Kein Client-Secret eingegeben. Abgebrochen.'); return; }
+
+  setCredentials(clientId, clientSecret);
+  ui.alert('Gespeichert. Weiter mit "Redirect-URI anzeigen", dann "Mit Spotify verbinden".');
+}
+
+/**
+ * Speichert Client-ID/-Secret in den Script Properties. Bleibt als eigene
+ * Funktion erhalten, falls du sie weiterhin direkt im Editor aufrufen willst
+ * (z. B. für eine Automatisierung) – der Dialog oben ist nur der bequeme Weg.
+ */
 function setCredentials(clientId, clientSecret) {
   PropertiesService.getScriptProperties()
     .setProperties({ CLIENT_ID: clientId, CLIENT_SECRET: clientSecret });
+}
+
+function showRedirectUri() {
+  var ui = SpreadsheetApp.getUi();
+  var missing = missingCredentials();
+  if (missing) { ui.alert(missing); return; }
+  ui.alert('Redirect-URI für Spotify', OAuth2.getRedirectUri(), ui.ButtonSet.OK);
+}
+
+/**
+ * Zeigt die Authorization-URL als klickbaren Link in einem HTML-Dialog,
+ * statt sie nur ins Ausführungsprotokoll zu loggen – das Protokoll ist im
+ * gebundenen Editor leicht zu übersehen.
+ */
+function promptForAuthorization() {
+  var ui = SpreadsheetApp.getUi();
+  var missing = missingCredentials();
+  if (missing) { ui.alert(missing); return; }
+
+  var service = getService();
+  if (service.hasAccess()) {
+    ui.alert('Schon verbunden. Bei Bedarf zuerst "Verbindung zurücksetzen" wählen.');
+    return;
+  }
+
+  var url = service.getAuthorizationUrl();
+  var html = HtmlService.createHtmlOutput(
+    '<div style="font-family:sans-serif;padding:8px">' +
+    '<p>Diesen Link öffnen und den Zugriff bei Spotify erlauben:</p>' +
+    '<p><a href="' + url + '" target="_blank">' + url + '</a></p>' +
+    '<p>Danach dieses Fenster schließen und im Menü "Verbindung prüfen" wählen.</p>' +
+    '</div>').setWidth(480).setHeight(200);
+  ui.showModalDialog(html, 'Mit Spotify verbinden');
+}
+
+function checkConnection() {
+  var ui = SpreadsheetApp.getUi();
+  var missing = missingCredentials();
+  if (missing) { ui.alert(missing); return; }
+
+  ui.alert(getService().hasAccess()
+    ? 'Verbunden. Synchronisation läuft über den Trigger bzw. "Jetzt synchronisieren".'
+    : 'Noch nicht verbunden. "Mit Spotify verbinden" wählen und den Zugriff erlauben.');
+}
+
+function resetFromMenu() {
+  reset();
+  SpreadsheetApp.getUi().alert('Verbindung zurückgesetzt. Neu verbinden über "Mit Spotify verbinden".');
+}
+
+function runFromMenu() {
+  var ui = SpreadsheetApp.getUi();
+  var missing = missingCredentials();
+  if (missing) { ui.alert(missing); return; }
+  if (!getService().hasAccess()) {
+    ui.alert('Noch nicht verbunden. Zuerst "Mit Spotify verbinden" wählen.');
+    return;
+  }
+  run();
+  ui.alert('Synchronisiert.');
+}
+
+function missingCredentials() {
+  var props = PropertiesService.getScriptProperties();
+  if (!props.getProperty('CLIENT_ID') || !props.getProperty('CLIENT_SECRET')) {
+    return 'Erst "Zugangsdaten eintragen" ausführen.';
+  }
+  return null;
 }
 
 function setup() {
@@ -100,7 +225,13 @@ function getLogSheet() {
  * ========================================================================= */
 
 function run() {
-  var service = getService();
+  var service;
+  try {
+    service = getService();
+  } catch (e) {
+    Logger.log(e.message);
+    return;
+  }
   if (!service.hasAccess()) {
     Logger.log('Nicht autorisiert. Diese URL öffnen:\n%s', service.getAuthorizationUrl());
     return;
@@ -439,14 +570,20 @@ function spotifyRequest(method, path, payload) {
 
 function getService() {
   var props = PropertiesService.getScriptProperties();
+  var clientId = props.getProperty('CLIENT_ID');
+  var clientSecret = props.getProperty('CLIENT_SECRET');
+  if (!clientId || !clientSecret) {
+    throw new Error('Keine Spotify-Zugangsdaten hinterlegt. Menü "Spotify" → "Zugangsdaten eintragen".');
+  }
+
   var scopes = ['user-read-recently-played', 'user-read-playback-state'];
   if (CONFIG.ENABLE_PLAYBACK_CONTROL) scopes.push('user-modify-playback-state');
 
   return OAuth2.createService('Spotify')
     .setAuthorizationBaseUrl('https://accounts.spotify.com/authorize')
     .setTokenUrl('https://accounts.spotify.com/api/token')
-    .setClientId(props.getProperty('CLIENT_ID'))
-    .setClientSecret(props.getProperty('CLIENT_SECRET'))
+    .setClientId(clientId)
+    .setClientSecret(clientSecret)
     .setScope(scopes.join(' '))
     .setCallbackFunction('authCallback')
     .setPropertyStore(PropertiesService.getUserProperties());
