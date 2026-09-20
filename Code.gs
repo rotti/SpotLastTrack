@@ -93,6 +93,7 @@ function onOpen() {
     .addItem('Status prüfen', 'checkConnection')
     .addItem('Jetzt synchronisieren', 'runFromMenu')
     .addItem('Neu klassifizieren (ganzes Log)', 'reclassifyAllFromMenu')
+    .addItem('Sheet reparieren (Zeit-Zellen)', 'repairTimeCellsFromMenu')
     .addSeparator()
     .addItem('Verbindung zurücksetzen', 'resetFromMenu')
     .addItem('Redirect-URI anzeigen', 'showRedirectUri')
@@ -308,9 +309,9 @@ function pollPlayback(sheet) {
   var top = readRows(sheet, 1);
 
   if (top.length && top[0][C.URI - 1] === entry.uri) {
-    // Gleicher Track wie zuletzt: nur Zeitstempel und Position aktualisieren.
+    // Gleiches Format-vor-Wert-Prinzip wie in prependRows.
     sheet.getRange(2, C.DATE).setValue(entry.date);
-    sheet.getRange(2, C.POS).setValue(msToClock(entry.positionMs));
+    sheet.getRange(2, C.POS).setNumberFormat('@').setValue(msToClock(entry.positionMs));
     sheet.getRange(2, C.POS_MS).setValue(entry.positionMs);
   } else {
     prependRows(sheet, [entryToRow(entry)]);
@@ -440,6 +441,35 @@ function extractTrailingNumber(title) {
   return m ? parseInt(m[1], 10) : null;
 }
 
+/**
+ * Behebt bereits im Sheet vorhandene Zellen, die Google Sheets fälschlich
+ * als Uhrzeit statt als Text interpretiert hat (betrifft v. a. "Länge" und
+ * "Position", z. B. "3:03"). Schreibt sie als Klartext zurück und setzt das
+ * Zellformat auf Text, damit das nicht erneut passiert. Nötig für Zeilen,
+ * die vor der prependRows()/pollPlayback()-Korrektur entstanden sind.
+ */
+function repairTimeCells() {
+  var sheet = getLogSheet();
+  var last = sheet.getLastRow();
+  if (last < 2) return 0;
+
+  var count = last - 1;
+  [C.POS, C.LEN].forEach(function (col) {
+    var range = sheet.getRange(2, col, count, 1);
+    var values = range.getValues();
+    var fixed = values.map(function (row) { return [timeCellToString(row[0])]; });
+    range.setNumberFormat('@').setValues(fixed);
+  });
+  return count;
+}
+
+function repairTimeCellsFromMenu() {
+  var n = repairTimeCells();
+  SpreadsheetApp.getUi().alert(n
+    ? n + ' Zeile(n) geprüft und bei Bedarf repariert.'
+    : 'Sheet ist leer, nichts zu tun.');
+}
+
 /** Klassifiziert die komplette Sheet-Historie neu (Menüpunkt). */
 function reclassifyAllFromMenu() {
   var ui = SpreadsheetApp.getUi();
@@ -471,21 +501,35 @@ function getResumeItems(showAll) {
     if (seen[album]) return;
     seen[album] = true;
 
+    // Google Sheets interpretiert Werte wie "3:03" ohne explizites
+    // Text-Format oft als Uhrzeit und liefert dann ein Date-Objekt statt
+    // eines Strings zurück. Ein Date-Objekt im Antwortobjekt bringt die
+    // Übertragung zum Client zum Scheitern (Client erhält null), ohne dass
+    // der Server das als Fehler meldet. Deshalb hier hart auf String
+    // normalisieren.
+    var position = timeCellToString(r[C.POS - 1]);
+    var length = timeCellToString(r[C.LEN - 1]);
+
     out.push({
       album: album,
       artist: r[C.ARTIST - 1],
       track: r[C.TRACK - 1],
       type: r[C.TYPE - 1],
       when: formatWhen(r[C.DATE - 1]),
-      position: r[C.POS - 1] || '',
+      position: position,
       positionMs: Number(r[C.POS_MS - 1]) || 0,
-      length: r[C.LEN - 1] || '',
-      percent: percentOf(r[C.POS_MS - 1], r[C.LEN - 1]),
+      length: length,
+      percent: percentOf(r[C.POS_MS - 1], length),
       link: r[C.LINK - 1],
       uri: r[C.URI - 1],
       image: r[C.IMAGE - 1]
     });
   });
+
+  // Diagnose – im Ausführungsprotokoll sichtbar, um Anzeigefehler von
+  // Datenfehlern zu unterscheiden. Kann später entfernt werden.
+  Logger.log('getResumeItems(showAll=%s): rows=%s, items=%s, albums=%s',
+    showAll, rows.length, out.length, JSON.stringify(out.map(function (o) { return o.album; })));
 
   return {
     items: out.slice(0, 25),
@@ -643,6 +687,11 @@ function getOverrides() {
 
 function prependRows(sheet, rows) {
   sheet.insertRowsAfter(1, rows.length);
+  // Text-Format MUSS vor setValues gesetzt werden – sonst interpretiert
+  // Sheets "3:03" bereits beim Schreiben als Uhrzeit, und die Formatierung
+  // danach ändert nur noch die Anzeige, nicht den zugrundeliegenden Typ.
+  sheet.getRange(2, C.POS, rows.length, 1).setNumberFormat('@');
+  sheet.getRange(2, C.LEN, rows.length, 1).setNumberFormat('@');
   sheet.getRange(2, 1, rows.length, HEADERS.length).setValues(rows);
   sheet.getRange(2, C.DATE, rows.length, 1).setNumberFormat('dd.MM.yyyy HH:mm');
 }
@@ -663,6 +712,21 @@ function msToClock(ms) {
   var s = total % 60;
   var pad = function (v) { return v < 10 ? '0' + v : String(v); };
   return h ? h + ':' + pad(m) + ':' + pad(s) : m + ':' + pad(s);
+}
+
+/**
+ * Wandelt einen Sheet-Zellwert, den Google Sheets fälschlich als Uhrzeit
+ * interpretiert hat, zurück in einen "M:SS"/"H:MM:SS"-String. Ein
+ * unverändertes Date-Objekt im Rückgabewert einer serverseitigen Funktion
+ * lässt die Übertragung an den Client scheitern (Client erhält null).
+ */
+function timeCellToString(value) {
+  if (value instanceof Date) {
+    var pad = function (v) { return v < 10 ? '0' + v : String(v); };
+    var h = value.getHours(), m = value.getMinutes(), s = value.getSeconds();
+    return h ? h + ':' + pad(m) + ':' + pad(s) : m + ':' + pad(s);
+  }
+  return value || '';
 }
 
 function percentOf(posMs, lengthClock) {
